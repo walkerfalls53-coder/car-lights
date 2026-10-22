@@ -1,0 +1,167 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<title>Car Lights</title>
+<style>
+:root{--bg:#0b0d10;--card:#151920;--line:#262c36;--text:#eef1f5;--dim:#8a93a3;--accent:#5ad1ff;--ok:#3ddc84;--bad:#ff5c5c}
+*{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+body{margin:0;background:var(--bg);color:var(--text);font:16px/1.4 -apple-system,system-ui,sans-serif;padding:16px 16px calc(24px + env(safe-area-inset-bottom))}
+h1{font-size:22px;margin:4px 0 2px}
+.sub{color:var(--dim);font-size:13px;margin-bottom:14px}
+.card{background:var(--card);border:1px solid var(--line);border-radius:16px;padding:14px;margin-bottom:14px}
+.row{display:flex;align-items:center;gap:10px}
+.between{justify-content:space-between}
+.title{font-weight:700;font-size:17px}
+.app{color:var(--dim);font-size:12px}
+.dot{width:10px;height:10px;border-radius:50%;background:var(--bad);flex:none}
+.dot.on{background:var(--ok)}
+.status{font-size:12px;color:var(--dim)}
+button{background:#222833;color:var(--text);border:1px solid var(--line);border-radius:10px;padding:10px 12px;font-size:15px;font-weight:600}
+button.primary{background:var(--accent);color:#04121a;border:none}
+button:disabled{opacity:.4}
+.controls{margin-top:12px;display:none}
+.controls.show{display:block}
+.swatches{display:grid;grid-template-columns:repeat(8,1fr);gap:8px;margin:10px 0}
+.sw{aspect-ratio:1;border-radius:50%;border:2px solid #0006}
+input[type=color]{width:52px;height:40px;border:none;background:none;padding:0}
+input[type=range]{flex:1;accent-color:var(--accent)}
+.lbl{font-size:13px;color:var(--dim);width:72px}
+.toggle{width:64px}
+.sync{border-color:var(--accent)}
+.hint{font-size:12px;color:var(--dim);margin-top:8px}
+select,input[type=text]{width:100%;background:#0f1217;color:var(--text);border:1px solid var(--line);border-radius:10px;padding:10px;font-size:14px}
+.log{background:#07090c;border-radius:10px;padding:8px;font:11px/1.4 ui-monospace,Menlo,monospace;color:#9fb3c8;max-height:180px;overflow:auto;white-space:pre-wrap;margin-top:8px}
+.warn{background:#2a1f0c;border:1px solid #5a4214;color:#ffd38a;border-radius:12px;padding:10px;font-size:13px;margin-bottom:14px;display:none}
+</style>
+</head>
+<body>
+<h1>Car Lights</h1>
+<div class="sub">Close the original apps first. Each controller only allows one connection.</div>
+<div class="warn" id="nobt">This browser can't use Bluetooth. On iPhone, open this page in the free <b>Bluefy</b> app.</div>
+
+<div class="card sync">
+  <div class="row between"><div class="title">All lights</div>
+    <div class="row"><button id="allOn">On</button><button id="allOff">Off</button></div></div>
+  <div class="swatches" id="allSw"></div>
+  <div class="row"><span class="lbl">Custom</span><input type="color" id="allColor" value="#5ad1ff"></div>
+</div>
+
+<div id="cards"></div>
+
+<script>
+const LIGHTS=[
+ {id:'bar',name:'Light Bar',app:'LotusLamp X',kind:'lotus'},
+ {id:'int',name:'Interior',app:'Magic Lantern',kind:'lotus'},
+ {id:'head',name:'Headlights',app:'LightRunning',kind:'unknown'}
+];
+const PRESETS=['#ff0000','#ff7a00','#ffe600','#00ff3c','#00e5ff','#0040ff','#a000ff','#ffffff'];
+const SERVICES=[0xfff0,0xffe0,0xffe5,0xffd0,0xffd5,0xff00,0xae00,0xfee7,0xffb0,0xffc0,0x1910,0xfe00];
+const hasBT=!!(navigator.bluetooth);
+if(!hasBT)document.getElementById('nobt').style.display='block';
+
+// ---- Lotus / ELK protocol (Magic Lantern + LotusLamp X) ----
+const KEY=[0x2A,0x7F,0xC1,0x94,0x33,0xDE,0x45,0xE0,0x8B,0x11,0x5C,0xA6,0x09,0xF2,0x7D,0xB8];
+function encrypt(p){const r=crypto.getRandomValues(new Uint8Array(12)),o=new Uint8Array(21);
+ for(let i=0;i<9;i++){const k=((r[i]*27)&255)^((r[(i+3)%12]+55)&255)^((r[(i+7)%12]>>2)&255)^((i*85)&255);o[i]=p[i]^k}
+ for(let i=0;i<12;i++)o[9+i]=r[i]^KEY[i%16];return o}
+const L={
+ power:on=>{const v=on?1:0;return[0x7E,0x04,0x04,v,0x00,v,0xFF,0x00,0xEF]},
+ color:(r,g,b)=>[0x7E,0x07,0x05,0x03,r,g,b,0x10,0xEF],
+ bright:p=>[0x7E,0x04,0x01,p,0x00,0xFF,0xFF,0x00,0xEF]
+};
+// Candidate formats for testing unknown controllers
+const FORMATS={
+ lotus:{label:'Lotus / ELK (7E…EF)',color:L.color,power:L.power},
+ triones:{label:'Triones / HappyLighting (56…AA)',color:(r,g,b)=>[0x56,r,g,b,0x00,0xF0,0xAA],power:on=>on?[0xCC,0x23,0x33]:[0xCC,0x24,0x33]},
+ magichome:{label:'MagicHome-style (31…0F)',color:(r,g,b)=>{const a=[0x31,r,g,b,0x00,0x00,0x0F];a.push(a.reduce((x,y)=>x+y,0)&255);return a},power:on=>on?[0x71,0x23,0x0F,0xA3]:[0x71,0x24,0x0F,0xA4]},
+ bledom7e00:{label:'Old BLEDOM (7E 00 05…)',color:(r,g,b)=>[0x7E,0x00,0x05,0x03,r,g,b,0x00,0xEF],power:on=>on?[0x7E,0x00,0x04,0xF0,0x00,0x01,0xFF,0x00,0xEF]:[0x7E,0x00,0x04,0x00,0x00,0x00,0xFF,0x00,0xEF]}
+};
+const hex=a=>Array.from(a).map(x=>x.toString(16).padStart(2,'0')).join(' ');
+const rgb=h=>[1,3,5].map(i=>parseInt(h.substr(i,2),16));
+const store={get(k){try{return localStorage.getItem(k)}catch(e){return null}},set(k,v){try{localStorage.setItem(k,v)}catch(e){}}};
+
+const state={};
+function card(l){
+ const el=document.createElement('div');el.className='card';
+ el.innerHTML=`<div class="row between"><div><div class="title">${l.name}</div><div class="app">${l.app}</div></div>
+  <div class="row"><span class="dot" id="${l.id}-dot"></span><button class="primary" id="${l.id}-conn">Connect</button></div></div>
+  <div class="status" id="${l.id}-st">Not connected</div>
+  <div class="controls" id="${l.id}-ctl">
+   <div class="row"><button class="toggle" id="${l.id}-on">On</button><button class="toggle" id="${l.id}-off">Off</button>
+    <input type="color" id="${l.id}-color" value="#ffffff"></div>
+   <div class="swatches" id="${l.id}-sw"></div>
+   ${l.kind==='lotus'?`<div class="row"><span class="lbl">Brightness</span><input type="range" min="0" max="100" value="100" id="${l.id}-br"></div>`:''}
+   ${l.kind==='unknown'?`<div class="hint">Setup mode: pick a channel and a format, then tap a color. Tell Claude which combo changes your headlights.</div>
+    <div style="margin-top:8px"><select id="${l.id}-char"></select></div>
+    <div style="margin-top:8px"><select id="${l.id}-fmt">${Object.entries(FORMATS).map(([k,f])=>`<option value="${k}">${f.label}</option>`).join('')}</select></div>
+    <div class="row" style="margin-top:8px"><input type="text" id="${l.id}-raw" placeholder="Raw hex, e.g. 7e 07 05 03 ff 00 00 10 ef"><button id="${l.id}-send">Send</button></div>
+    <div class="log" id="${l.id}-log"></div>`:''}
+  </div>`;
+ document.getElementById('cards').appendChild(el);
+ const $=s=>document.getElementById(`${l.id}-${s}`);
+ const sw=$('sw');PRESETS.forEach(c=>{const b=document.createElement('button');b.className='sw';b.style.background=c;b.onclick=()=>setColor(l.id,c);sw.appendChild(b)});
+ $('conn').onclick=()=>state[l.id]?.dev?.gatt?.connected?disconnect(l.id):connect(l);
+ $('on').onclick=()=>power(l.id,true);$('off').onclick=()=>power(l.id,false);
+ $('color').oninput=e=>setColor(l.id,e.target.value);
+ if($('br'))$('br').oninput=e=>bright(l.id,+e.target.value);
+ if($('send'))$('send').onclick=()=>{const b=$('raw').value.trim().split(/[\s,]+/).map(x=>parseInt(x,16)).filter(x=>!isNaN(x));if(b.length)send(l.id,b,true)};
+}
+function log(id,msg){const g=document.getElementById(`${id}-log`);if(g){g.textContent=msg+'\n'+g.textContent}}
+function setStatus(id,txt,on){document.getElementById(`${id}-st`).textContent=txt;document.getElementById(`${id}-dot`).classList.toggle('on',!!on);
+ document.getElementById(`${id}-ctl`).classList.toggle('show',!!on);document.getElementById(`${id}-conn`).textContent=on?'Disconnect':'Connect'}
+
+async function connect(l){
+ if(!hasBT){alert('Open this page in Bluefy to use Bluetooth.');return}
+ try{
+  setStatus(l.id,'Choose your '+l.name.toLowerCase()+' controller…');
+  const dev=await navigator.bluetooth.requestDevice({acceptAllDevices:true,optionalServices:SERVICES});
+  const s={dev,light:l,enc:/ELK-\*/.test(dev.name||''),q:Promise.resolve(),pending:null,timer:null};state[l.id]=s;
+  dev.addEventListener('gattserverdisconnected',()=>setStatus(l.id,'Disconnected — tap Connect',false));
+  setStatus(l.id,'Connecting to '+(dev.name||'device')+'…');
+  const srv=await dev.gatt.connect();
+  const chars=[];
+  for(const svc of await srv.getPrimaryServices()){
+   try{for(const c of await svc.getCharacteristics()){if(c.properties.write||c.properties.writeWithoutResponse)chars.push(c)}}catch(e){}
+  }
+  if(!chars.length)throw new Error('No writable channels found');
+  const pref=chars.find(c=>c.uuid.startsWith('0000fff3'))||chars[0];
+  s.chars=chars;s.ch=pref;
+  if(l.kind==='unknown'){
+   const sel=document.getElementById(`${l.id}-char`);
+   sel.innerHTML=chars.map((c,i)=>`<option value="${i}">${c.service.uuid.slice(4,8)} → ${c.uuid.slice(4,8)}${c.properties.writeWithoutResponse?' (fast)':''}</option>`).join('');
+   sel.value=chars.indexOf(pref);sel.onchange=()=>s.ch=chars[+sel.value];
+   log(l.id,`Connected to "${dev.name}". ${chars.length} writable channel(s).`);
+  }
+  setStatus(l.id,'Connected: '+(dev.name||'device'),true);
+ }catch(e){setStatus(l.id,e.message||'Connection failed',false)}
+}
+function disconnect(id){try{state[id].dev.gatt.disconnect()}catch(e){}}
+
+function send(id,bytes,raw){
+ const s=state[id];if(!s?.dev?.gatt?.connected)return;
+ let data=Uint8Array.from(bytes);
+ if(!raw&&s.light.kind==='lotus'&&s.enc&&[1,3,4].includes(data[2]))data=encrypt(data);
+ s.q=s.q.then(async()=>{try{
+   s.ch.properties.writeWithoutResponse?await s.ch.writeValueWithoutResponse(data):await s.ch.writeValue(data);
+   log(id,'→ '+hex(data));
+  }catch(e){log(id,'✗ '+e.message)}
+  await new Promise(r=>setTimeout(r,60))});
+}
+function fmtOf(id){const s=state[id];if(s.light.kind==='lotus')return FORMATS.lotus;return FORMATS[document.getElementById(`${id}-fmt`).value]}
+function power(id,on){if(state[id])send(id,fmtOf(id).power(on))}
+function setColor(id,h){const s=state[id];if(!s)return;document.getElementById(`${id}-color`).value=h;store.set(id+'-color',h);
+ s.pending=h;if(s.timer)return;s.timer=setTimeout(()=>{s.timer=null;send(id,fmtOf(id).color(...rgb(s.pending)))},90)}
+function bright(id,p){const s=state[id];if(!s)return;clearTimeout(s.bt);s.bt=setTimeout(()=>send(id,L.bright(p)),90)}
+
+LIGHTS.forEach(card);
+const allSw=document.getElementById('allSw');
+PRESETS.forEach(c=>{const b=document.createElement('button');b.className='sw';b.style.background=c;b.onclick=()=>LIGHTS.forEach(l=>setColor(l.id,c));allSw.appendChild(b)});
+document.getElementById('allColor').oninput=e=>LIGHTS.forEach(l=>setColor(l.id,e.target.value));
+document.getElementById('allOn').onclick=()=>LIGHTS.forEach(l=>power(l.id,true));
+document.getElementById('allOff').onclick=()=>LIGHTS.forEach(l=>power(l.id,false));
+</script>
+</body>
+</html>
